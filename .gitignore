@@ -11,3 +11,5 @@ build/
 .env
 venv/
 .venv/
+.claude/
+*.pdf
