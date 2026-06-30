@@ -1,0 +1,4 @@
+sympy>=1.10
+
+# Development dependencies (not installed by default):
+# pytest>=7.0
