@@ -86,48 +86,168 @@ _DIM_ALIASES = {
     "-": "", "1": "", "dimless": "",
 }
 
+# Compound SI units expanded to fundamental dimensions before parsing.
+# Order matters: longer tokens first so 'Pa' is not matched inside 'Pascal'.
+_SI_COMPOUND = {
+    # energy
+    "J":    "M*L^2/T^2",           # joule
+    # power
+    "W":    "M*L^2/T^3",           # watt
+    # force
+    "N":    "M*L/T^2",             # newton  (overrides 'N'=amount below)
+    # pressure
+    "Pa":   "M/L/T^2",             # pascal
+    # voltage
+    "V":    "M*L^2/T^3/I",         # volt
+    # electric charge
+    "C":    "I*T",                  # coulomb
+    # frequency
+    "Hz":   "1/T",                  # hertz
+    # dynamic viscosity
+    "Pas":  "M/L/T",               # pascal-second  (must come before Pa)
+    # thermal conductance
+    "W/m/K":   "M*L/T^3/theta",    # pre-expanded common combo
+    "W/m/K^2": "M*L/T^3/theta^2",
+    "W/mK":    "M*L/T^3/theta",
+    # specific heat
+    "J/kg/K":  "L^2/T^2/theta",    # pre-expanded common combo
+    "J/kgK":   "L^2/T^2/theta",
+    # dynamic viscosity
+    "kg/m/s":  "M/L/T",
+}
+
+
+def _expand_si(s: str) -> str:
+    """Replace compound SI units with fundamental-dimension strings.
+
+    Tries longest tokens first to avoid partial replacements.
+    Only replaces whole-token occurrences (bounded by non-alphanumeric chars).
+    """
+    # Try multi-token combos first (longest first)
+    for compound, expansion in sorted(_SI_COMPOUND.items(), key=lambda x: -len(x[0])):
+        # Match the compound unit as a standalone token
+        pattern = r"(?<![A-Za-z])" + re.escape(compound) + r"(?![A-Za-z0-9_])"
+        if re.search(pattern, s):
+            s = re.sub(pattern, f"({expansion})", s)
+    return s
+
 
 def parse_dim(s: str) -> Dict[str, int]:
     """
     Parse a dimension string into a dict of {fundamental_dim: exponent}.
 
-    Accepted syntax (case-sensitive for M, L, T, theta, I, N):
-        'M/L^3'              →  {M: 1, L: -3}
-        'M*L/T^3/theta'      →  {M: 1, L: 1, T: -3, theta: -1}
-        'L^2/T^2/theta'      →  {L: 2, T: -2, theta: -1}
-        'L'                  →  {L: 1}
-        '1'  or  '-'         →  {}   (dimensionless)
+    Accepts both fundamental-dimension notation and natural SI units:
+
+    Fundamental:
+        'M/L^3'                →  {M: 1, L: -3}
+        'M*L/T^3/theta'        →  {M: 1, L: 1, T: -3, theta: -1}
+        'L^2/T^2/theta'        →  {L: 2, T: -2, theta: -1}
+
+    SI units (automatically expanded):
+        'kg/m^3'               →  {M: 1, L: -3}
+        'W/m/K'                →  {M: 1, L: 1, T: -3, theta: -1}
+        'J/kg/K'               →  {L: 2, T: -2, theta: -1}
+        'Pa'                   →  {M: 1, L: -1, T: -2}
+        'W/m^2/K'              →  {M: 1, T: -3, theta: -1}
+
+    Dimensionless:
+        '1'  or  '-'           →  {}
     """
     s = s.strip().lstrip("[").rstrip("]")
-    # Apply aliases
-    for alias, canon in _DIM_ALIASES.items():
+    if not s or s in ("", "1", "-"):
+        return {}
+
+    # Step 1: expand compound SI units to fundamental-dimension strings
+    s = _expand_si(s)
+
+    # Step 2: apply single-token aliases (kg→M, m→L, s→T, K→theta, …)
+    for alias, canon in sorted(_DIM_ALIASES.items(), key=lambda x: -len(x[0])):
         s = re.sub(rf"\b{re.escape(alias)}\b", canon, s)
     s = s.strip()
     if not s or s in ("", "1", "-"):
         return {}
 
+    # Step 3: evaluate the resulting expression by expanding parentheses
+    # and collecting exponents of each fundamental dimension
     result: Dict[str, int] = {}
+    _parse_into(s, 1, result)
+    return {k: v for k, v in result.items() if v != 0}
 
-    # Split on * and / keeping the separator
-    tokens = re.split(r"([*/])", s)
-    sign = 1
-    for tok in tokens:
+
+def _parse_into(s: str, outer_sign: int, result: Dict[str, int]) -> None:
+    """Recursively parse a dimension string, handling parenthesised groups."""
+    # Remove outer parentheses if the whole string is wrapped
+    s = s.strip()
+    while s.startswith("(") and s.endswith(")"):
+        # Check that the opening paren matches the closing paren
+        depth = 0
+        for i, ch in enumerate(s):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if depth == 0 and i < len(s) - 1:
+                break  # not a single wrapping pair
+        else:
+            s = s[1:-1].strip()
+            continue
+        break
+
+    # Split on top-level * and / (not inside parentheses)
+    tokens = _split_top(s)
+    sign = outer_sign
+    for i, tok in enumerate(tokens):
         tok = tok.strip()
-        if tok == "*":
-            sign = 1
-        elif tok == "/":
-            sign = -1
-        elif tok:
-            # Parse base^exponent
-            m = re.fullmatch(r"([A-Za-z_]+)\^?([-\d]*)", tok)
-            if not m:
-                continue
-            base, exp_str = m.group(1), m.group(2)
-            exp = int(exp_str) if exp_str else 1
-            if base:
-                result[base] = result.get(base, 0) + sign * exp
+        if not tok:
+            continue
+        if tok in ("*", "/"):
+            sign = outer_sign if tok == "*" else -outer_sign
+            continue
 
-    return result
+        # Parenthesised sub-expression with optional exponent: (M*L/T^2)^2
+        m_paren = re.fullmatch(r"\((.+)\)\^?([-\d]+)?", tok)
+        if m_paren:
+            inner, exp_str = m_paren.group(1), m_paren.group(2)
+            exp = int(exp_str) if exp_str else 1
+            sub: Dict[str, int] = {}
+            _parse_into(inner, 1, sub)
+            for dim, e in sub.items():
+                result[dim] = result.get(dim, 0) + sign * exp * e
+            sign = outer_sign  # reset after each token
+            continue
+
+        # Plain token: base^exponent
+        m_tok = re.fullmatch(r"([A-Za-z_]+)\^?([-\d]*)", tok)
+        if m_tok:
+            base, exp_str = m_tok.group(1), m_tok.group(2)
+            exp = int(exp_str) if exp_str else 1
+            if base in FUND_DIMS:
+                result[base] = result.get(base, 0) + sign * exp
+        sign = outer_sign  # reset after each token
+
+
+def _split_top(s: str):
+    """Split a string on * and / at the top level (not inside parentheses)."""
+    tokens = []
+    depth = 0
+    cur = []
+    for ch in s:
+        if ch == "(":
+            depth += 1
+            cur.append(ch)
+        elif ch == ")":
+            depth -= 1
+            cur.append(ch)
+        elif ch in ("*", "/") and depth == 0:
+            if cur:
+                tokens.append("".join(cur))
+            tokens.append(ch)
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        tokens.append("".join(cur))
+    return tokens
 
 
 def _dim_vec(dim_dict: Dict[str, int], fund_dims: List[str]) -> List[int]:
@@ -300,7 +420,7 @@ def auto_scales(
     dims: Dict,
     numerical_values: Optional[Dict] = None,
     max_candidates: int = 8,
-    max_params_per_scale: int = 3,
+    max_params_per_scale: int = 4,
 ) -> List[Dict]:
     """
     Automatically discover candidate characteristic scales for a PDE.

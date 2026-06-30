@@ -11,6 +11,50 @@ from pde_nondim.autoscale import parse_dim, auto_scales
 # 1. parse_dim
 # ---------------------------------------------------------------------------
 
+class TestParseDimSI:
+    """SI unit strings — the natural way users think about dimensions."""
+
+    def test_kg_per_m3(self):
+        assert parse_dim("kg/m^3") == {"M": 1, "L": -3}
+
+    def test_W_per_m_per_K(self):
+        assert parse_dim("W/m/K") == {"M": 1, "L": 1, "T": -3, "theta": -1}
+
+    def test_J_per_kg_per_K(self):
+        assert parse_dim("J/kg/K") == {"L": 2, "T": -2, "theta": -1}
+
+    def test_Pa(self):
+        assert parse_dim("Pa") == {"M": 1, "L": -1, "T": -2}
+
+    def test_W_per_m2_per_K(self):
+        assert parse_dim("W/m^2/K") == {"M": 1, "T": -3, "theta": -1}
+
+    def test_kg_per_m_per_s(self):
+        assert parse_dim("kg/m/s") == {"M": 1, "L": -1, "T": -1}
+
+    def test_m2_per_s(self):
+        assert parse_dim("m^2/s") == {"L": 2, "T": -1}
+
+    def test_W(self):
+        assert parse_dim("W") == {"M": 1, "L": 2, "T": -3}
+
+    def test_J(self):
+        assert parse_dim("J") == {"M": 1, "L": 2, "T": -2}
+
+    def test_m_per_s(self):
+        assert parse_dim("m/s") == {"L": 1, "T": -1}
+
+    def test_K(self):
+        assert parse_dim("K") == {"theta": 1}
+
+    def test_m(self):
+        assert parse_dim("m") == {"L": 1}
+
+    def test_fundamental_still_works(self):
+        assert parse_dim("M/L^3") == {"M": 1, "L": -3}
+        assert parse_dim("M*L/T^3/theta") == {"M": 1, "L": 1, "T": -3, "theta": -1}
+
+
 class TestParseDim:
     def test_single_dim(self):
         assert parse_dim("L") == {"L": 1}
@@ -130,6 +174,33 @@ class TestAutoScalesHeat:
     def test_max_candidates_respected(self):
         candidates = auto_scales(self.pde, self.dims, max_candidates=3)
         assert len(candidates) <= 3
+
+    def test_si_unit_input_finds_diffusive_scale(self):
+        """Users can supply natural SI units instead of M/L^3 notation."""
+        x, t = sp.symbols("x t", positive=True)
+        rho, Cp, k, L, dT = sp.symbols("rho C_p k L DeltaT", positive=True)
+        T = sp.Function("T")(x, t)
+        pde = sp.Eq(rho * Cp * sp.diff(T, t), k * sp.diff(T, x, 2))
+
+        dims_si = {
+            T:   "K",
+            x:   "m",
+            t:   "s",
+            rho: "kg/m^3",
+            Cp:  "J/kg/K",
+            k:   "W/m/K",
+            L:   "m",
+            dT:  "K",
+        }
+        num = {rho: 7990, Cp: 500, k: 15, L: 0.01, dT: 1000}
+        candidates = auto_scales(pde, dims_si, numerical_values=num)
+
+        # Rank-1 candidate must be the diffusive time scale (score = 0)
+        assert candidates[0]["score"] < 0.01
+        t_scale = str(sp.simplify(
+            [s for v, s in candidates[0]["scales"].items() if str(v) == "t"][0]
+        ))
+        assert "k" in t_scale or "rho" in t_scale
 
 
 # ---------------------------------------------------------------------------
